@@ -15,7 +15,8 @@ def load_csv(filename: str):
 
 def to_dt(df, col):
     if df is not None and col in df.columns:
-        df[col] = pd.to_datetime(df[col], errors="coerce")
+        # ✅ timestamp는 UTC로 통일(타임존 이슈 방지)
+        df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
     return df
 
 st.title("스포츠 이용자 이탈 위험 대시보드 (v1)")
@@ -36,11 +37,15 @@ missing = [name for name, df in [
 if missing:
     st.warning("배포 환경에 data/raw CSV가 없어 데모 모드로 실행합니다.")
     churn = pd.DataFrame({"user_id":[1,2,3], "churn_status":[0,1,0]})
-    watch = pd.DataFrame({"user_id":[1,2,3], "timestamp": pd.to_datetime(["2026-02-01","2026-02-02","2026-02-03"]),
-                          "watch_duration_minutes":[30,10,50]})
-    search = pd.DataFrame({"user_id":[1], "timestamp": pd.to_datetime(["2026-02-01"])})
-    reco  = pd.DataFrame({"user_id":[1], "timestamp": pd.to_datetime(["2026-02-01"])})
+    watch = pd.DataFrame({
+        "user_id":[1,2,3],
+        "timestamp": pd.to_datetime(["2026-02-01","2026-02-02","2026-02-03"], utc=True),
+        "watch_duration_minutes":[30,10,50]
+    })
+    search = pd.DataFrame({"user_id":[1], "timestamp": pd.to_datetime(["2026-02-01"], utc=True)})
+    reco  = pd.DataFrame({"user_id":[1], "timestamp": pd.to_datetime(["2026-02-01"], utc=True)})
 
+# ✅ 여기서 timestamp UTC 변환
 watch = to_dt(watch, "timestamp")
 search = to_dt(search, "timestamp")
 reco = to_dt(reco, "timestamp")
@@ -103,7 +108,6 @@ st.subheader("현재 상태: 누가 위험할까 (v1)")
 
 # 1) 위험 라벨(is_risk) 확인
 if "is_risk" not in churn.columns:
-    # churn_risk_score 또는 churn_status로 is_risk 생성
     if "churn_risk_score" in churn.columns:
         thr = st.sidebar.slider("위험 점수 임계값", 0.0, 1.0, 0.7, 0.05)
         churn["is_risk"] = (churn["churn_risk_score"] >= thr).astype(int)
@@ -126,38 +130,39 @@ else:
             st.info("watch_data에 user_id 또는 timestamp가 없어 세그먼트를 만들 수 없습니다.")
         else:
             w_tmp = watch.copy()
-            w_tmp["timestamp"] = pd.to_datetime(w_tmp["timestamp"], errors="coerce")
+            # ✅ 이미 utc=True로 변환되어 있지만, 안전하게 한 번 더
+            w_tmp["timestamp"] = pd.to_datetime(w_tmp["timestamp"], errors="coerce", utc=True)
             w_tmp = w_tmp.dropna(subset=["timestamp"])
 
             # 시청량 컬럼 자동 탐색
-            watch_time_col = None
+            watch_time_col2 = None
             for cand in ["watch_duration_minutes", "watch_minutes", "watch_hours", "watch_time"]:
                 if cand in w_tmp.columns:
-                    watch_time_col = cand
+                    watch_time_col2 = cand
                     break
 
-            if watch_time_col is None:
-                # 시청량 컬럼 없으면 1회 시청=1로 대체
+            if watch_time_col2 is None:
                 w_tmp["_watch_amt"] = 1
-                watch_time_col = "_watch_amt"
+                watch_time_col2 = "_watch_amt"
 
-            now = pd.Timestamp.utcnow()
             user_act = (
                 w_tmp.groupby("user_id")
                 .agg(
                     watch_days=("timestamp", lambda x: x.dt.date.nunique()),
                     last_watch=("timestamp", "max"),
-                    watch_amt=(watch_time_col, "sum"),
+                    watch_amt=(watch_time_col2, "sum"),
                     events=("timestamp", "count"),
                 )
                 .reset_index()
             )
+
+            # ✅ 여기서 터지던 TypeError 해결 (tz-aware UTC 통일)
+            user_act["last_watch"] = pd.to_datetime(user_act["last_watch"], errors="coerce", utc=True)
+            now = pd.Timestamp.now(tz="UTC")
             user_act["recency_days"] = (now - user_act["last_watch"]).dt.days
+            user_act["recency_days"] = user_act["recency_days"].fillna(9999).astype(int)
 
             # 간단 규칙 기반 세그먼트
-            # - 미접속 위험형: 최근 14일 이상 미접속
-            # - 라이트형: 최근 접속은 했지만, 시청일수/시청량이 낮음
-            # - 헤비형: 나머지
             amt_median = user_act["watch_amt"].median()
             user_act["segment_auto"] = "헤비형"
             user_act.loc[user_act["recency_days"] >= 14, "segment_auto"] = "미접속 위험형"
@@ -185,7 +190,6 @@ else:
             st.dataframe(seg_table, use_container_width=True)
 
     else:
-        # churn_final_data에 segment 컬럼이 있는 경우
         seg_table = (
             churn.groupby(seg_col)["is_risk"]
             .agg(user_count="count", risk_ratio="mean")
@@ -193,6 +197,7 @@ else:
             .sort_values("risk_ratio", ascending=False)
         )
         st.dataframe(seg_table, use_container_width=True)
+
 st.divider()
 
 st.subheader("타이밍 분석 / 이탈 구간 / 액션 가이드")
