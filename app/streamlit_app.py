@@ -15,13 +15,13 @@ def load_csv(filename: str):
 
 def to_dt(df, col):
     if df is not None and col in df.columns:
-        # ✅ timestamp는 UTC로 통일(타임존 이슈 방지)
+        # timestamp는 UTC로 통일(타임존 이슈 방지)
         df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
     return df
 
 st.title("스포츠 이용자 이탈 위험 대시보드 (v1)")
 
-# 여기 파일명이 너 폴더에 있는 파일명이랑 같아야 함
+# 파일 로드
 churn = load_csv("churn_final_data.csv")
 watch = load_csv("watch_data.csv")
 search = load_csv("search_data.csv")
@@ -45,27 +45,40 @@ if missing:
     search = pd.DataFrame({"user_id":[1], "timestamp": pd.to_datetime(["2026-02-01"], utc=True)})
     reco  = pd.DataFrame({"user_id":[1], "timestamp": pd.to_datetime(["2026-02-01"], utc=True)})
 
-# ✅ 여기서 timestamp UTC 변환
+# timestamp UTC 변환
 watch = to_dt(watch, "timestamp")
 search = to_dt(search, "timestamp")
-reco = to_dt(reco, "timestamp")
+reco  = to_dt(reco, "timestamp")
 
 st.sidebar.header("필터")
 
-# 주차 필터(가능하면)
+# =========================
+# 주차 필터(ISO 주차 + 서울시간)
+# =========================
 if "timestamp" in watch.columns:
-    watch["week"] = watch["timestamp"].dt.to_period("W").astype(str)
+    watch["_ts_seoul"] = watch["timestamp"].dt.tz_convert("Asia/Seoul")
+
+    iso = watch["_ts_seoul"].dt.isocalendar()
+    watch["week"] = (
+        iso["year"].astype(str)
+        + "-W"
+        + iso["week"].astype(str).str.zfill(2)
+    )
+
     week_list = ["all"] + sorted(watch["week"].dropna().unique().tolist())
 else:
     week_list = ["all"]
 
+# ✅ 주차 선택 + 필터 적용 데이터(w)
 selected_week = st.sidebar.selectbox("주차", week_list)
 
 w = watch.copy()
 if selected_week != "all" and "week" in w.columns:
     w = w[w["week"] == selected_week]
 
+# =========================
 # 위험군 정의(v1)
+# =========================
 risk_col = None
 if "churn_risk_score" in churn.columns:
     risk_col = "churn_risk_score"
@@ -129,8 +142,7 @@ else:
         if "user_id" not in watch.columns or "timestamp" not in watch.columns:
             st.info("watch_data에 user_id 또는 timestamp가 없어 세그먼트를 만들 수 없습니다.")
         else:
-            w_tmp = watch.copy()
-            # ✅ 이미 utc=True로 변환되어 있지만, 안전하게 한 번 더
+            w_tmp = w.copy()   # ✅ 선택한 주차로 세그먼트 계산
             w_tmp["timestamp"] = pd.to_datetime(w_tmp["timestamp"], errors="coerce", utc=True)
             w_tmp = w_tmp.dropna(subset=["timestamp"])
 
@@ -156,7 +168,7 @@ else:
                 .reset_index()
             )
 
-            # ✅ 여기서 터지던 TypeError 해결 (tz-aware UTC 통일)
+            # recency 계산(TypeError 방지: UTC tz-aware 통일)
             user_act["last_watch"] = pd.to_datetime(user_act["last_watch"], errors="coerce", utc=True)
             now = pd.Timestamp.now(tz="UTC")
             user_act["recency_days"] = (now - user_act["last_watch"]).dt.days
@@ -183,9 +195,9 @@ else:
                 .sort_values("risk_ratio", ascending=False)
             )
 
-            c1, c2 = st.columns(2)
-            c1.metric("전체 위험군 비율", f"{churn_seg['is_risk'].mean():.1%}")
-            c2.metric("표시 세그먼트 수", f"{seg_table.shape[0]}")
+            c1b, c2b = st.columns(2)
+            c1b.metric("전체 위험군 비율", f"{churn_seg['is_risk'].mean():.1%}")
+            c2b.metric("표시 세그먼트 수", f"{seg_table.shape[0]}")
 
             st.dataframe(seg_table, use_container_width=True)
 
