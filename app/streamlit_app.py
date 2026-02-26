@@ -34,8 +34,12 @@ missing = [name for name, df in [
 ] if df is None]
 
 if missing:
-    st.warning("data/raw 폴더에 파일이 없습니다: " + ", ".join(missing))
-    st.stop()
+    st.warning("배포 환경에 data/raw CSV가 없어 데모 모드로 실행합니다.")
+    churn = pd.DataFrame({"user_id":[1,2,3], "churn_status":[0,1,0]})
+    watch = pd.DataFrame({"user_id":[1,2,3], "timestamp": pd.to_datetime(["2026-02-01","2026-02-02","2026-02-03"]),
+                          "watch_duration_minutes":[30,10,50]})
+    search = pd.DataFrame({"user_id":[1], "timestamp": pd.to_datetime(["2026-02-01"])})
+    reco  = pd.DataFrame({"user_id":[1], "timestamp": pd.to_datetime(["2026-02-01"])})
 
 watch = to_dt(watch, "timestamp")
 search = to_dt(search, "timestamp")
