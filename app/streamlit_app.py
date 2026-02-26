@@ -99,20 +99,100 @@ else:
 
 st.divider()
 
-st.subheader("상태 분류: 누가 위험한가 (v1)")
-seg_col = None
-for cand in ["segment", "sports_segment", "user_segment"]:
-    if cand in churn.columns:
-        seg_col = cand
-        break
+st.subheader("현재 상태: 누가 위험할까 (v1)")
 
-if seg_col and "is_risk" in churn.columns:
-    seg = churn.groupby(seg_col)["is_risk"].agg(["count", "mean"]).reset_index()
-    seg.columns = [seg_col, "user_count", "risk_ratio"]
-    st.dataframe(seg, use_container_width=True)
+# 1) 위험 라벨(is_risk) 확인
+if "is_risk" not in churn.columns:
+    # churn_risk_score 또는 churn_status로 is_risk 생성
+    if "churn_risk_score" in churn.columns:
+        thr = st.sidebar.slider("위험 점수 임계값", 0.0, 1.0, 0.7, 0.05)
+        churn["is_risk"] = (churn["churn_risk_score"] >= thr).astype(int)
+    elif "churn_status" in churn.columns:
+        churn["is_risk"] = churn["churn_status"].astype(int)
+
+if "is_risk" not in churn.columns:
+    st.info("churn_final_data에 churn_risk_score 또는 churn_status가 없어 위험군을 계산할 수 없습니다.")
 else:
-    st.info("세그먼트 컬럼이 없거나 위험 라벨이 없어 v1에서는 표시하지 않음")
+    # 2) segment 컬럼이 없으면 watch_data로 자동 생성
+    seg_col = None
+    for cand in ["segment", "sports_segment", "user_segment"]:
+        if cand in churn.columns:
+            seg_col = cand
+            break
 
+    if seg_col is None:
+        # watch_data 기반 간단 세그먼트(헤비/라이트/미접속 위험)
+        if "user_id" not in watch.columns or "timestamp" not in watch.columns:
+            st.info("watch_data에 user_id 또는 timestamp가 없어 세그먼트를 만들 수 없습니다.")
+        else:
+            w_tmp = watch.copy()
+            w_tmp["timestamp"] = pd.to_datetime(w_tmp["timestamp"], errors="coerce")
+            w_tmp = w_tmp.dropna(subset=["timestamp"])
+
+            # 시청량 컬럼 자동 탐색
+            watch_time_col = None
+            for cand in ["watch_duration_minutes", "watch_minutes", "watch_hours", "watch_time"]:
+                if cand in w_tmp.columns:
+                    watch_time_col = cand
+                    break
+
+            if watch_time_col is None:
+                # 시청량 컬럼 없으면 1회 시청=1로 대체
+                w_tmp["_watch_amt"] = 1
+                watch_time_col = "_watch_amt"
+
+            now = pd.Timestamp.utcnow()
+            user_act = (
+                w_tmp.groupby("user_id")
+                .agg(
+                    watch_days=("timestamp", lambda x: x.dt.date.nunique()),
+                    last_watch=("timestamp", "max"),
+                    watch_amt=(watch_time_col, "sum"),
+                    events=("timestamp", "count"),
+                )
+                .reset_index()
+            )
+            user_act["recency_days"] = (now - user_act["last_watch"]).dt.days
+
+            # 간단 규칙 기반 세그먼트
+            # - 미접속 위험형: 최근 14일 이상 미접속
+            # - 라이트형: 최근 접속은 했지만, 시청일수/시청량이 낮음
+            # - 헤비형: 나머지
+            amt_median = user_act["watch_amt"].median()
+            user_act["segment_auto"] = "헤비형"
+            user_act.loc[user_act["recency_days"] >= 14, "segment_auto"] = "미접속 위험형"
+            user_act.loc[
+                (user_act["recency_days"] < 14)
+                & (user_act["watch_days"] <= 2)
+                & (user_act["watch_amt"] <= amt_median),
+                "segment_auto"
+            ] = "라이트형"
+
+            churn_seg = churn.merge(user_act[["user_id", "segment_auto"]], on="user_id", how="left")
+            churn_seg["segment_auto"] = churn_seg["segment_auto"].fillna("세그먼트 미분류")
+
+            seg_table = (
+                churn_seg.groupby("segment_auto")["is_risk"]
+                .agg(user_count="count", risk_ratio="mean")
+                .reset_index()
+                .sort_values("risk_ratio", ascending=False)
+            )
+
+            c1, c2 = st.columns(2)
+            c1.metric("전체 위험군 비율", f"{churn_seg['is_risk'].mean():.1%}")
+            c2.metric("표시 세그먼트 수", f"{seg_table.shape[0]}")
+
+            st.dataframe(seg_table, use_container_width=True)
+
+    else:
+        # churn_final_data에 segment 컬럼이 있는 경우
+        seg_table = (
+            churn.groupby(seg_col)["is_risk"]
+            .agg(user_count="count", risk_ratio="mean")
+            .reset_index()
+            .sort_values("risk_ratio", ascending=False)
+        )
+        st.dataframe(seg_table, use_container_width=True)
 st.divider()
 
 st.subheader("타이밍 분석 / 이탈 구간 / 액션 가이드")
